@@ -226,7 +226,7 @@ class PaymentTransaction(models.Model):
             elif status_type == "refund" and self.operation == "refund":
                 self._set_done()
         elif status_code == "2":  # Declined
-            self._set_canceled(state_message=response_content.get("x_response_reason_text"))
+            self._set_canceled(state_message=self._authorize_get_decline_message(response_content))
         elif status_code == "4":  # Held for Review
             self._set_pending()
         else:  # Error / Unknown code
@@ -243,6 +243,43 @@ class PaymentTransaction(models.Model):
                     error=error_code,
                 )
             )
+
+    def _authorize_get_decline_message(self, response_content):
+        """Return the decline reason, completed with a hint when the AVS or CVV check failed.
+
+        Authorize.Net returns the same generic reason for most declines. The AVS and CVV results
+        are the only indication of a decline that the customer can fix themselves.
+
+        :param dict response_content: The formatted response of the transaction request.
+        :return: The decline message.
+        :rtype: str
+        """
+        reason_code = response_content.get("x_response_reason_code")
+        reason_text = response_content.get("x_response_reason_text")
+        both_mismatch = reason_code in const.AVS_AND_CVV_MISMATCH_REASON_CODES
+        avs_mismatch = both_mismatch or (
+            response_content.get("x_avs_result_code") in const.AVS_MISMATCH_RESULT_CODES
+            and reason_code not in const.AVS_MISMATCH_REASON_CODES
+        )
+        cvv_mismatch = (
+            both_mismatch
+            or reason_code in const.CVV_MISMATCH_REASON_CODES
+            or response_content.get("x_cvv_result_code") in const.CVV_MISMATCH_RESULT_CODES
+        )
+        if avs_mismatch and cvv_mismatch:
+            hint = self.env._(
+                "The billing address and the card security code (CVV) do not match the card"
+                " issuer's records."
+            )
+        elif avs_mismatch:
+            hint = self.env._(
+                "The billing address or postal code does not match the card issuer's records."
+            )
+        elif cvv_mismatch:
+            hint = self.env._("The card security code (CVV) does not match.")
+        else:
+            return reason_text
+        return f"{reason_text}\n{hint}" if reason_text else hint
 
     def _extract_amount_data(self, payment_data):
         """Override of `payment` to extract the amount and currency from the payment data."""
